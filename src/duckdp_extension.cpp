@@ -1,188 +1,197 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "include/duckdp_extension.hpp"
-#include "duckdb/common/serializer/buffered_file_reader.hpp"
-#include "duckdb/common/unordered_map.hpp"
-#include "duckdb/main/appender.hpp"
-#include "duckdb/main/connection.hpp"
+#include "duckdb.hpp"
+#include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
+#include "duckdb/function/aggregate_function.hpp"
+#include "duckdb/parser/parsed_data/create_aggregate_function_info.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
-#include "duckdb/optimizer/optimizer.hpp"
-#include "duckdb/parallel/thread_context.hpp"
-#include "duckdb/parser/parser.hpp"
-#include "duckdb/parser/parser_extension.hpp"
-#include "duckdb/planner/planner.hpp"
-#include "duckdb/main/config.hpp"
-#include <fcntl.h>
-#include <fstream>
-#include <iostream>
-#include <regex>
-#include <string.h>
-#include <sys/stat.h>
-#include <duckdb/common/serializer/binary_serializer.hpp>
-#include <signal.h>
-#include <stdio.h>
-#include <sys/types.h>
-#include <unistd.h>
-#include <duckdb/catalog/catalog_entry/table_catalog_entry.hpp>
-#include <duckdb/function/table/table_scan.hpp>
-#include <duckdb/parser/parsed_data/create_table_function_info.hpp>
-#include <duckdb/planner/operator/logical_get.hpp>
 
-#include <absl/status/status.h>
+// DP library headers
 #include <absl/status/statusor.h>
-#include <algorithms/bounded-mean.h>
 #include <algorithms/bounded-sum.h>
+#include <proto/util.h>
+
+#include <vector>
+#include <limits>
+#include <type_traits>
+#include <memory>
 
 namespace duckdb {
 
+// Bind data with fixed (for now) epsilon/lower/upper
+struct DPSumBindData : public FunctionData {
+	double epsilon;
+	double lower;
+	double upper;
 
-class DPSumFunction : public TableFunction {
-public:
-	DPSumFunction() {
-		name = "dp_sum";
-		// Arguments: input column, epsilon, lower, upper
-		arguments.push_back(LogicalType::DOUBLE); // input column
-		arguments.push_back(LogicalType::DOUBLE); // epsilon
-		arguments.push_back(LogicalType::DOUBLE); // lower
-		arguments.push_back(LogicalType::DOUBLE); // upper
-		bind = DPSumBind;
-		init_global = DPSumInit;
-		function = DPSumFunc;
-	}
+	DPSumBindData(double epsilon_p = 1.0, double lower_p = 0.0, double upper_p = 10.0)
+	    : epsilon(epsilon_p), lower(lower_p), upper(upper_p) {}
 
-	struct DPSumBindData : public TableFunctionData {
-		DPSumBindData(double epsilon, double lower, double upper) : epsilon(epsilon), lower(lower), upper(upper) {}
-		double epsilon;
-		double lower;
-		double upper;
-	};
-
-	struct DPSumGlobalData : public GlobalTableFunctionState {
-		DPSumGlobalData(double epsilon, double lower, double upper) {}
-		absl::StatusOr<std::unique_ptr<differential_privacy::BoundedSum<double>>> dp_sum;
-		idx_t offset = 0;
-	};
-
-	static duckdb::unique_ptr<FunctionData> DPSumBind(ClientContext &context, TableFunctionBindInput &input,
-													  vector<LogicalType> &return_types, vector<string> &names) {
-		names.emplace_back("dp_sum");
-		return_types.emplace_back(LogicalType::DOUBLE);
-		double epsilon = input.inputs[1].GetValue<double>();
-		double lower = input.inputs[2].GetValue<double>();
-		double upper = input.inputs[3].GetValue<double>();
+	unique_ptr<FunctionData> Copy() const override {
 		return make_uniq<DPSumBindData>(epsilon, lower, upper);
 	}
 
-	static duckdb::unique_ptr<GlobalTableFunctionState> DPSumInit(ClientContext &context,
-																  TableFunctionInitInput &input) {
-		auto &bind_data = input.bind_data->Cast<DPSumBindData>();
-		return make_uniq<DPSumGlobalData>(bind_data.epsilon, bind_data.lower, bind_data.upper);
-	}
-
-	static void DPSumFunc(ClientContext &context, TableFunctionInput &data_p, DataChunk &input) {
-		auto &state = data_p.global_state->Cast<DPSumGlobalData>();
-		// If input chunk has rows, add them to the DP sum
-		/*
-		if (input.size() > 0) {
-			for (idx_t i = 0; i < input.size(); ++i) {
-				if (!input.GetValue(0, i).IsNull()) {
-					double value = input.GetValue(0, i).GetValue<double>();
-					if (state.dp_sum.ok() && state.dp_sum.value()) {
-						state.dp_sum.value()->AddEntry(value);
-					}
-				}
-			}
-			return; // Wait for DuckDB to call with empty chunk
-		}
-		// If input chunk is empty and we haven't output yet, output the result
-		if (state.offset == 0) {
-			double dp_result = 0.0;
-			Output PartialResult();
-			if (state.dp_sum.value()) {
-				auto result = state.dp_sum.value().get()
-			}
-			input.SetCardinality(1);
-			input.SetValue(0, 0, Value::DOUBLE(dp_result));
-			state.offset = 1;
-		} */
-
-		// Build the BoundedSum object
-		std::vector<int> data = {1, 2, 3, 4, 5};
-
-		auto bounded_sum_builder = differential_privacy::BoundedSum<int>::Builder();
-		bounded_sum_builder.SetEpsilon(1.0);
-		bounded_sum_builder.SetLower(0);
-		bounded_sum_builder.SetUpper(10);
-
-		auto bounded_sum_result = bounded_sum_builder.Build();
-		if (bounded_sum_result.ok()) {
-			std::cout << "ok";
-			bounded_sum_result.value()->AddEntry(5);
-			bounded_sum_result.value()->AddEntry(4);
-			bounded_sum_result.value()->AddEntry(3);
-		}
-
-		auto result = bounded_sum_result.value()->Result(data.begin(), data.end());
-		std::cout << differential_privacy::GetValue<int64_t>(result.value());
-
-
-
+	bool Equals(const FunctionData &other) const override {
+		auto *o = dynamic_cast<const DPSumBindData *>(&other);
+		return o && o->epsilon == epsilon && o->lower == lower && o->upper == upper;
 	}
 };
 
-static void LoadInternal(ExtensionLoader &loader) {
+// Per-type state storing collected values via unique_ptr (LEGACY aggregate pattern)
+template <class T>
+struct DPSumState {
+	std::unique_ptr<std::vector<T>> values; // lazily allocated
+};
 
-	/*
-	auto &instance = loader.GetDatabaseInstance();
-	DuckDB db(instance);
-	Connection con(db);
-	auto &client_context = *con.context;
-	auto &catalog = Catalog::GetSystemCatalog(client_context);
+// Operation implementation templated on input type T
+// Produces a DOUBLE result.
+template <class T>
+struct DPSumOperation {
+	template <class STATE>
+	static void Initialize(STATE &state) {
+		// Release any existing (defensive, though newly allocated state should be null-initialized)
+		state.values.release();
+		state.values = nullptr;
+	}
 
+	static bool IgnoreNull() { return true; }
 
-	// add a parser extension
-	auto &db_config = DBConfig::GetConfig(instance);
-	//auto dp_parser = DPParserExtension();
-	//db_config.parser_extensions.push_back(dp_parser);
-	 */
+	template <class STATE>
+	static void Destroy(STATE &state, AggregateInputData &) {
+		if (state.values) {
+			state.values = nullptr; // unique_ptr destructor frees
+		}
+	}
 
-	DPSumFunction dp_sum_function;
-	CreateTableFunctionInfo dp_sum_info(dp_sum_function);
-	loader.RegisterFunction(dp_sum_info);
+	template <class A_TYPE, class STATE, class OP>
+	static void Operation(STATE &state, const A_TYPE &a_data, AggregateUnaryInput &idata) {
+		if (!state.values) {
+			state.values = std::make_unique<std::vector<T>>();
+			state.values->reserve(STANDARD_VECTOR_SIZE);
+		}
+		state.values->push_back(static_cast<T>(a_data));
+	}
 
-	// the first argument is the name of the view to flush
-	// the second is the database - duckdb, postgres, etc.
-	//auto flush = PragmaFunction::PragmaCall("flush", FlushFunction, {LogicalType::VARCHAR}, {LogicalType::VARCHAR});
-	//loader.RegisterFunction(flush);
+	template <class INPUT_TYPE, class STATE, class OP>
+	static void ConstantOperation(STATE &state, const INPUT_TYPE &input, AggregateUnaryInput &idata, idx_t count) {
+		for (idx_t i = 0; i < count; i++) {
+			Operation<INPUT_TYPE, STATE, OP>(state, input, idata);
+		}
+	}
 
+	template <class STATE, class OP>
+	static void Combine(const STATE &source, STATE &target, AggregateInputData &) {
+		if (!source.values || source.values->empty()) {
+			return;
+		}
+		if (!target.values) {
+			// Deep copy source vector into new target vector
+			target.values = std::make_unique<std::vector<T>>(*source.values);
+			return;
+		}
+		// Append with reserve to minimize reallocations
+		target.values->reserve(target.values->size() + source.values->size());
+		target.values->insert(target.values->end(), source.values->begin(), source.values->end());
+	}
+
+	template <class TARGET_TYPE, class STATE>
+	static void Finalize(STATE &state, TARGET_TYPE &target, AggregateFinalizeData &finalize_data) {
+		auto &bind = finalize_data.input.bind_data->Cast<DPSumBindData>();
+		using DPType = typename std::conditional<std::is_floating_point<T>::value, double, int64_t>::type;
+		using DPBoundedSum = differential_privacy::BoundedSum<DPType>;
+		typename DPBoundedSum::Builder builder;
+		builder.SetEpsilon(bind.epsilon);
+		builder.SetLower(static_cast<DPType>(bind.lower));
+		builder.SetUpper(static_cast<DPType>(bind.upper));
+		auto mech_status = builder.Build();
+		if (!mech_status.ok()) {
+			finalize_data.ReturnNull();
+			return;
+		}
+		auto ptr = std::move(mech_status).value();
+
+		if (!state.values || state.values->empty()) {
+			std::vector<DPType> empty;
+			auto res = ptr->Result(empty.begin(), empty.end());
+			if (!res.ok()) { finalize_data.ReturnNull(); return; }
+			target = static_cast<double>(differential_privacy::GetValue<DPType>(res.value()));
+			return;
+		}
+
+		if constexpr (!std::is_same<DPType, T>::value) {
+			std::vector<DPType> converted;
+			converted.reserve(state.values->size());
+			for (auto &v : *state.values) converted.push_back(static_cast<DPType>(v));
+			auto res = ptr->Result(converted.begin(), converted.end());
+			if (!res.ok()) { finalize_data.ReturnNull(); return; }
+			target = static_cast<double>(differential_privacy::GetValue<DPType>(res.value()));
+		} else {
+			auto res = ptr->Result(state.values->begin(), state.values->end());
+			if (!res.ok()) { finalize_data.ReturnNull(); return; }
+			target = static_cast<double>(differential_privacy::GetValue<DPType>(res.value()));
+		}
+	}
+};
+
+// Bind: currently single argument. (Later extend to optional epsilon/lower/upper args.)
+unique_ptr<FunctionData> DPSumBind(ClientContext &, AggregateFunction &, vector<unique_ptr<Expression>> &arguments) {
+	if (arguments.size() != 1) {
+		throw BinderException("dp_sum currently supports exactly one argument: dp_sum(value)");
+	}
+	// For now fixed epsilon/lower/upper. TODO: parse optional parameters.
+	return make_uniq<DPSumBindData>(1.0, 0.0, 10.0);
+}
+
+template <typename T>
+static AggregateFunction DPSumCreateAggregate(const LogicalType &input_type) {
+	return AggregateFunction::UnaryAggregateDestructor<
+	    DPSumState<T>, T, double, DPSumOperation<T>, AggregateDestructorType::LEGACY>(
+	    input_type, LogicalType::DOUBLE);
 }
 
 void DuckdpExtension::Load(ExtensionLoader &loader) {
-    LoadInternal(loader);
+	AggregateFunctionSet dp_sum_set("dp_sum");
+
+	// Register different numeric input types
+	{
+		auto f = DPSumCreateAggregate<int32_t>(LogicalType::INTEGER);
+		f.bind = DPSumBind;
+		dp_sum_set.AddFunction(f);
+	}
+	{
+		auto f = DPSumCreateAggregate<int64_t>(LogicalType::BIGINT);
+		f.bind = DPSumBind;
+		dp_sum_set.AddFunction(f);
+	}
+	{
+		auto f = DPSumCreateAggregate<float>(LogicalType::FLOAT);
+		f.bind = DPSumBind;
+		dp_sum_set.AddFunction(f);
+	}
+	{
+		auto f = DPSumCreateAggregate<double>(LogicalType::DOUBLE);
+		f.bind = DPSumBind;
+		dp_sum_set.AddFunction(f);
+	}
+
+	loader.RegisterFunction(dp_sum_set);
 }
-string DuckdpExtension::Name() {
-	return "DP";
-}
-std::string DuckdpExtension::Version() const {
-	return "0.1.0"; // minimal version string
-}
+
+string DuckdpExtension::Name() { return "duckdp"; }
+std::string DuckdpExtension::Version() const { return "0.1.0"; }
 
 } // namespace duckdb
 
 extern "C" {
 
-DUCKDB_EXTENSION_API const char *server_version() {
-	return duckdb::DuckDB::LibraryVersion();
-}
-
-DUCKDB_CPP_EXTENSION_ENTRY(dp, loader) {
-	duckdb::LoadInternal(loader);
-}
-
 DUCKDB_EXTENSION_API void duckdp_duckdb_cpp_init(duckdb::ExtensionLoader &loader) {
 	duckdb::DuckdpExtension extension;
 	extension.Load(loader);
 }
+
+DUCKDB_EXTENSION_API const char *duckdp_version() { return duckdb::DuckDB::LibraryVersion(); }
 }
 
 #ifndef DUCKDB_EXTENSION_MAIN
