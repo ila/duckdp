@@ -1,6 +1,8 @@
 {
         "dependencies": [
-                "openssl"
+                "openssl",
+                "protobuf",
+                "abseil"
         ],
         "vcpkg-configuration": {
                 "overlay-ports": [

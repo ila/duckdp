@@ -11,6 +11,7 @@ namespace duckdb {
 // Parser extension
 //===--------------------------------------------------------------------===//
 
+/*
 struct DPParseData : ParserExtensionParseData {
 
 	string query;
@@ -62,6 +63,8 @@ public:
 };
 
 BoundStatement DPBind(ClientContext &context, Binder &binder, OperatorExtensionInfo *info, SQLStatement &statement);
+
+ */
 
 } // namespace duckdb
 
