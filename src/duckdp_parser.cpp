@@ -6,8 +6,6 @@
 namespace duckdb {
 
 // DPParserExtension constructor implementation
-
-/*
 DPParserExtension::DPParserExtension() {
 	parse_function = DPParseFunction;
 	plan_function = DPPlanFunction;
@@ -76,8 +74,4 @@ BoundStatement DPBind(ClientContext &context, Binder &binder, OperatorExtensionI
 std::string DPParserExtension::Name() {
 	return "dp_parser_extension";
 }
-
-
- */
-
 } // namespace duckdb

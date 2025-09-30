@@ -11,10 +11,12 @@ namespace duckdb {
 // Parser extension
 //===--------------------------------------------------------------------===//
 
-/*
 struct DPParseData : ParserExtensionParseData {
 
 	string query;
+	float epsilon;
+	float lower;
+	float upper;
 	unique_ptr<ParserExtensionParseData> Copy() const override {
 		return make_uniq_base<ParserExtensionParseData, DPParseData>(query);
 	}
@@ -40,31 +42,6 @@ public:
 	static string db;
 };
 
-class DPFunction : public TableFunction {
-public:
-	DPFunction();
-
-	struct DPBindData : TableFunctionData {
-		explicit DPBindData(bool result) : result(result) {
-		}
-		bool result;
-	};
-
-	struct DPGlobalData : GlobalTableFunctionState {
-		DPGlobalData() : offset(0) {
-		}
-		idx_t offset;
-	};
-
-	static unique_ptr<FunctionData> DPBind(ClientContext &context, TableFunctionBindInput &input,
-	                                         vector<LogicalType> &return_types, vector<string> &names);
-	static unique_ptr<GlobalTableFunctionState> DPInit(ClientContext &context, TableFunctionInitInput &input);
-	static void DPFunc(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
-};
-
-BoundStatement DPBind(ClientContext &context, Binder &binder, OperatorExtensionInfo *info, SQLStatement &statement);
-
- */
 
 } // namespace duckdb
 

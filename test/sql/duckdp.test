@@ -1,23 +1,52 @@
-# name: test/sql/duckdp.test
-# description: test duckdp extension
-# group: [sql]
+# DuckDP SQLLogic Tests
 
-# Before we load the extension, this will fail
+statement ok
+CREATE TABLE t(x INT);
+INSERT INTO t VALUES (1),(2),(3),(4);
+
+# High epsilon + explicit bounds => near-deterministic sum of 10
+query I
+SELECT (dp_sum(x, 1000000000000.0, 0, 10) BETWEEN 9.999999 AND 10.000001)::INT FROM t;
+----
+1
+
+# Two-argument form (defaults bounds 0,10) => near-deterministic sum of 10
+query I
+SELECT (dp_sum(x, 1000000000000.0) BETWEEN 9.999999 AND 10.000001)::INT FROM t;
+----
+1
+
+# Clamping negative values to lower bound 0
+statement ok
+CREATE TABLE clamp(x INT);
+INSERT INTO clamp VALUES (-5),(-10);
+query I
+SELECT (dp_sum(x, 1000000000000.0, 0, 10) BETWEEN -0.000001 AND 0.000001)::INT FROM clamp;
+----
+1
+
+# Clamping values above upper bound (each 100 -> 10) => expected clamped sum 20
+statement ok
+CREATE TABLE big(x INT);
+INSERT INTO big VALUES (100),(100);
+query I
+SELECT (dp_sum(x, 1000000000000.0, 0, 10) BETWEEN 19.999999 AND 20.000001)::INT FROM big;
+----
+1
+
+# Error: no arguments
 statement error
-SELECT duckdp('Sam');
-----
-Catalog Error: Scalar Function with name duckdp does not exist!
+SELECT dp_sum();
 
-# Require statement will ensure this test is run with this extension loaded
-require duckdp
+# Error: negative epsilon
+statement error
+SELECT dp_sum(1, -1);
 
-# Confirm the extension works
-query I
-SELECT duckdp('Sam');
-----
-Duckdp Sam 🐥
+# Error: lower >= upper
+statement error
+SELECT dp_sum(1, 1, 10, 0);
 
-query I
-SELECT duckdp_openssl_version('Michael') ILIKE 'Duckdp Michael, my linked OpenSSL version is OpenSSL%';
-----
-true
+# Error: 3-argument form not supported (must be 1, 2, or 4)
+statement error
+SELECT dp_sum(1, 1, 2);
+
