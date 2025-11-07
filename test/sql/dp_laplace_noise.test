@@ -1,0 +1,207 @@
+# dp_laplace_noise: Add Laplace Noise to Raw Values
+# Tests for dp_laplace_noise() scalar function that adds DP noise to individual values
+#
+# API: dp_laplace_noise(value DOUBLE, epsilon DOUBLE, sensitivity DOUBLE) -> DOUBLE
+#
+# This function adds Laplace-distributed noise to individual values (row-level DP)
+# providing pure ε-differential privacy.
+
+# Setup test data
+statement ok
+CREATE TABLE employees(id INT, name VARCHAR, salary INT, age INT);
+
+statement ok
+INSERT INTO employees VALUES
+    (1, 'Alice', 75000, 28),
+    (2, 'Bob', 82000, 32),
+    (3, 'Carol', 68000, 29);
+
+# Test 1: Basic usage - add noise to integer salary column
+# Result should be a DOUBLE with noise added
+query I
+SELECT COUNT(*) FROM (
+    SELECT dp_laplace_noise(salary::DOUBLE, 1.0, 100000.0) as noisy_salary
+    FROM employees
+) WHERE noisy_salary IS NOT NULL;
+----
+3
+
+# Test 2: With very high epsilon, noise is minimal (near-deterministic)
+# Check that noisy value is close to original
+query I
+SELECT (dp_laplace_noise(1000.0, 1000000000000.0, 10000.0) BETWEEN 999.9 AND 1000.1)::INT;
+----
+1
+
+# Test 3: Different epsilon values affect noise magnitude
+# Smaller epsilon = more noise (can't test exact values due to randomness)
+# Just verify all return non-null
+query III
+SELECT
+    dp_laplace_noise(100.0, 0.1, 1000.0) IS NOT NULL,
+    dp_laplace_noise(100.0, 1.0, 1000.0) IS NOT NULL,
+    dp_laplace_noise(100.0, 10.0, 1000.0) IS NOT NULL;
+----
+1	1	1
+
+# Test 4: Apply to integer column (age)
+query I
+SELECT COUNT(*) FROM (
+    SELECT dp_laplace_noise(age::DOUBLE, 1.0, 100.0) as noisy_age
+    FROM employees
+) WHERE noisy_age IS NOT NULL;
+----
+3
+
+# Test 5: Multiple columns with different parameters
+query I
+SELECT COUNT(*) FROM (
+    SELECT
+        dp_laplace_noise(age::DOUBLE, 1.0, 100.0) as private_age,
+        dp_laplace_noise(salary::DOUBLE, 1.0, 100000.0) as private_salary
+    FROM employees
+) WHERE private_age IS NOT NULL AND private_salary IS NOT NULL;
+----
+3
+
+# Test 6: NULL handling - NULL input returns NULL output
+statement ok
+CREATE TABLE with_nulls(id INT, value INT);
+
+statement ok
+INSERT INTO with_nulls VALUES (1, 100), (2, NULL), (3, 200);
+
+query III
+SELECT
+    id,
+    value,
+    dp_laplace_noise(value::DOUBLE, 1.0, 1000.0) IS NULL as is_null
+FROM with_nulls
+ORDER BY id;
+----
+1	100	0
+2	NULL	1
+3	200	0
+
+# Test 7: Each call produces independent noise
+# Call twice on same value - results should be different (with very high probability)
+query I
+SELECT (
+    dp_laplace_noise(100.0, 1.0, 1000.0) != dp_laplace_noise(100.0, 1.0, 1000.0)
+)::INT;
+----
+1
+
+# Test 8: Works with negative values
+query I
+SELECT dp_laplace_noise(-50.0, 1.0, 1000.0) IS NOT NULL;
+----
+1
+
+# Test 9: Works with zero
+query I
+SELECT (dp_laplace_noise(0.0, 1000000000000.0, 100.0) BETWEEN -0.01 AND 0.01)::INT;
+----
+1
+
+# Test 10: Works with very large values
+query I
+SELECT dp_laplace_noise(1000000.0, 1.0, 10000000.0) IS NOT NULL;
+----
+1
+
+# Test 11: Works with small sensitivity
+query I
+SELECT dp_laplace_noise(10.0, 1.0, 1.0) IS NOT NULL;
+----
+1
+
+# Test 12: Different numeric types as input
+statement ok
+CREATE TABLE numeric_types(
+    i INTEGER,
+    b BIGINT,
+    f FLOAT,
+    d DOUBLE
+);
+
+statement ok
+INSERT INTO numeric_types VALUES (100, 100, 100.5, 100.5);
+
+query IIII
+SELECT
+    dp_laplace_noise(i::DOUBLE, 1.0, 1000.0) IS NOT NULL,
+    dp_laplace_noise(b::DOUBLE, 1.0, 1000.0) IS NOT NULL,
+    dp_laplace_noise(f, 1.0, 1000.0) IS NOT NULL,
+    dp_laplace_noise(d, 1.0, 1000.0) IS NOT NULL
+FROM numeric_types;
+----
+1	1	1	1
+
+# Test 13: Use in WHERE clause (result is still random but should work)
+query I
+SELECT COUNT(*) FROM employees
+WHERE dp_laplace_noise(salary::DOUBLE, 1.0, 100000.0) IS NOT NULL;
+----
+3
+
+# Test 14: Use in ORDER BY (should not error)
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM employees
+    ORDER BY dp_laplace_noise(salary::DOUBLE, 1.0, 100000.0)
+);
+----
+3
+
+# Test 15: Aggregate on noisy values
+query I
+SELECT AVG(dp_laplace_noise(salary::DOUBLE, 1.0, 100000.0)) IS NOT NULL FROM employees;
+----
+1
+
+# Test 16: Error cases
+
+# Wrong number of arguments (too few)
+statement error
+SELECT dp_laplace_noise(100.0);
+
+# Wrong number of arguments (too many)
+statement error
+SELECT dp_laplace_noise(100.0, 1.0, 1000.0, 5.0);
+
+# Negative epsilon (should fail or return NULL)
+statement error
+SELECT dp_laplace_noise(100.0, -1.0, 1000.0);
+
+# Zero epsilon (should fail or return NULL)
+statement error
+SELECT dp_laplace_noise(100.0, 0.0, 1000.0);
+
+# Negative sensitivity (should fail or return NULL)
+statement error
+SELECT dp_laplace_noise(100.0, 1.0, -1000.0);
+
+# Test 17: Edge case - very small epsilon (lots of noise)
+# Should still return a value
+query I
+SELECT dp_laplace_noise(100.0, 0.01, 1000.0) IS NOT NULL;
+----
+1
+
+# Test 18: Edge case - very large epsilon (minimal noise)
+query I
+SELECT (dp_laplace_noise(100.0, 10000.0, 1000.0) BETWEEN 99.0 AND 101.0)::INT;
+----
+1
+
+# Cleanup
+statement ok
+DROP TABLE employees;
+
+statement ok
+DROP TABLE with_nulls;
+
+statement ok
+DROP TABLE numeric_types;
+

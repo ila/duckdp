@@ -116,7 +116,13 @@ find_package(Protobuf CONFIG REQUIRED)
 #find_package(OpenSSL REQUIRED)
 #find_package(utf8_range CONFIG REQUIRED)
 
-set(EXTENSION_SOURCES src/duckdp_extension.cpp)
+set(EXTENSION_SOURCES src/duckdp_extension.cpp src/dp_benchmark.cpp)
+
+# Add refactored DP source files
+list(APPEND EXTENSION_SOURCES
+        src/dp_sum.cpp
+        src/dp_laplace.cpp
+        src/dp_gaussian.cpp)
 
 # Minimal differential privacy core sources + cephes (selective, not the full set) -----------------
 # (Added because we located inverse_gaussian_cdf in differential-privacy/third_party/cephes)
@@ -154,11 +160,11 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME} absl::strings absl::status absl
 target_include_directories(${EXTENSION_NAME} PRIVATE
         ${CMAKE_SOURCE_DIR}/duckdb/src/include
         ${CMAKE_SOURCE_DIR}/third_party/differential-privacy/proto
-)
+        ${CMAKE_SOURCE_DIR}/src)
 target_include_directories(${LOADABLE_EXTENSION_NAME} PRIVATE
         ${CMAKE_SOURCE_DIR}/duckdb/src/include
         ${CMAKE_SOURCE_DIR}/third_party/differential-privacy/proto
-)
+        ${CMAKE_SOURCE_DIR}/src)
 
 # After targets are defined, ensure root differential-privacy include path is present
 # (Needed for includes like third_party/cephes/... and base/status_macros.h)

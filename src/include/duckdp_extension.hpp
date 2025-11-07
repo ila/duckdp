@@ -15,6 +15,9 @@ public:
 	std::string Version() const override;
 };
 
+// Forward declaration for benchmark pragma function
+void DPSumBenchmarkPragma(ClientContext &context, const FunctionParameters &parameters);
+
 } // namespace duckdb
 
 #endif // DUCKDP_EXTENSION_HPP

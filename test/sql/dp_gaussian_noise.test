@@ -1,0 +1,237 @@
+# dp_gaussian_noise: Add Gaussian Noise to Raw Values
+# Tests for dp_gaussian_noise() scalar function that adds DP noise to individual values
+#
+# API: dp_gaussian_noise(value DOUBLE, epsilon DOUBLE, delta DOUBLE, sensitivity DOUBLE) -> DOUBLE
+#
+# This function adds Gaussian-distributed noise to individual values (row-level DP)
+# providing (ε,δ)-differential privacy.
+
+# Setup test data
+statement ok
+CREATE TABLE employees(id INT, name VARCHAR, salary INT, age INT);
+
+statement ok
+INSERT INTO employees VALUES
+    (1, 'Alice', 75000, 28),
+    (2, 'Bob', 82000, 32),
+    (3, 'Carol', 68000, 29);
+
+# Test 1: Basic usage - add Gaussian noise to integer salary column
+query I
+SELECT COUNT(*) FROM (
+    SELECT dp_gaussian_noise(salary::DOUBLE, 1.0, 1e-5, 100000.0) as noisy_salary
+    FROM employees
+) WHERE noisy_salary IS NOT NULL;
+----
+3
+
+# Test 2: With very high epsilon, noise is minimal (near-deterministic)
+query I
+SELECT (dp_gaussian_noise(1000.0, 1000000000000.0, 1e-10, 10000.0) BETWEEN 999.9 AND 1000.1)::INT;
+----
+1
+
+# Test 3: Different epsilon values (smaller epsilon = more noise)
+query III
+SELECT
+    dp_gaussian_noise(100.0, 0.1, 1e-5, 1000.0) IS NOT NULL,
+    dp_gaussian_noise(100.0, 1.0, 1e-5, 1000.0) IS NOT NULL,
+    dp_gaussian_noise(100.0, 10.0, 1e-5, 1000.0) IS NOT NULL;
+----
+1	1	1
+
+# Test 4: Different delta values
+query III
+SELECT
+    dp_gaussian_noise(100.0, 1.0, 1e-10, 1000.0) IS NOT NULL,
+    dp_gaussian_noise(100.0, 1.0, 1e-5, 1000.0) IS NOT NULL,
+    dp_gaussian_noise(100.0, 1.0, 1e-3, 1000.0) IS NOT NULL;
+----
+1	1	1
+
+# Test 5: Apply to integer column (age)
+query I
+SELECT COUNT(*) FROM (
+    SELECT dp_gaussian_noise(age::DOUBLE, 1.0, 1e-5, 100.0) as noisy_age
+    FROM employees
+) WHERE noisy_age IS NOT NULL;
+----
+3
+
+# Test 6: Multiple columns with different parameters
+query I
+SELECT COUNT(*) FROM (
+    SELECT
+        dp_gaussian_noise(age::DOUBLE, 1.0, 1e-5, 100.0) as private_age,
+        dp_gaussian_noise(salary::DOUBLE, 1.0, 1e-5, 100000.0) as private_salary
+    FROM employees
+) WHERE private_age IS NOT NULL AND private_salary IS NOT NULL;
+----
+3
+
+# Test 7: NULL handling - NULL input returns NULL output
+statement ok
+CREATE TABLE with_nulls(id INT, value INT);
+
+statement ok
+INSERT INTO with_nulls VALUES (1, 100), (2, NULL), (3, 200);
+
+query III
+SELECT
+    id,
+    value,
+    dp_gaussian_noise(value::DOUBLE, 1.0, 1e-5, 1000.0) IS NULL as is_null
+FROM with_nulls
+ORDER BY id;
+----
+1	100	0
+2	NULL	1
+3	200	0
+
+# Test 8: Each call produces independent noise
+query I
+SELECT (
+    dp_gaussian_noise(100.0, 1.0, 1e-5, 1000.0) != dp_gaussian_noise(100.0, 1.0, 1e-5, 1000.0)
+)::INT;
+----
+1
+
+# Test 9: Works with negative values
+query I
+SELECT dp_gaussian_noise(-50.0, 1.0, 1e-5, 1000.0) IS NOT NULL;
+----
+1
+
+# Test 10: Works with zero
+query I
+SELECT (dp_gaussian_noise(0.0, 1000000000000.0, 1e-10, 100.0) BETWEEN -0.01 AND 0.01)::INT;
+----
+1
+
+# Test 11: Works with very large values
+query I
+SELECT dp_gaussian_noise(1000000.0, 1.0, 1e-5, 10000000.0) IS NOT NULL;
+----
+1
+
+# Test 12: Different numeric types as input
+statement ok
+CREATE TABLE numeric_types(
+    i INTEGER,
+    b BIGINT,
+    f FLOAT,
+    d DOUBLE
+);
+
+statement ok
+INSERT INTO numeric_types VALUES (100, 100, 100.5, 100.5);
+
+query IIII
+SELECT
+    dp_gaussian_noise(i::DOUBLE, 1.0, 1e-5, 1000.0) IS NOT NULL,
+    dp_gaussian_noise(b::DOUBLE, 1.0, 1e-5, 1000.0) IS NOT NULL,
+    dp_gaussian_noise(f, 1.0, 1e-5, 1000.0) IS NOT NULL,
+    dp_gaussian_noise(d, 1.0, 1e-5, 1000.0) IS NOT NULL
+FROM numeric_types;
+----
+1	1	1	1
+
+# Test 13: Compare Laplace vs Gaussian on same data
+# Both should return non-null, different results
+query II
+SELECT
+    dp_laplace_noise(100.0, 1.0, 1000.0) IS NOT NULL,
+    dp_gaussian_noise(100.0, 1.0, 1e-5, 1000.0) IS NOT NULL;
+----
+1	1
+
+# Test 14: Use in WHERE clause
+query I
+SELECT COUNT(*) FROM employees
+WHERE dp_gaussian_noise(salary::DOUBLE, 1.0, 1e-5, 100000.0) IS NOT NULL;
+----
+3
+
+# Test 15: Use in ORDER BY
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM employees
+    ORDER BY dp_gaussian_noise(salary::DOUBLE, 1.0, 1e-5, 100000.0)
+);
+----
+3
+
+# Test 16: Aggregate on noisy values
+query I
+SELECT AVG(dp_gaussian_noise(salary::DOUBLE, 1.0, 1e-5, 100000.0)) IS NOT NULL FROM employees;
+----
+1
+
+# Test 17: Error cases
+
+# Wrong number of arguments (too few)
+statement error
+SELECT dp_gaussian_noise(100.0, 1.0);
+
+# Wrong number of arguments (too many)
+statement error
+SELECT dp_gaussian_noise(100.0, 1.0, 1e-5, 1000.0, 5.0);
+
+# Negative epsilon
+statement error
+SELECT dp_gaussian_noise(100.0, -1.0, 1e-5, 1000.0);
+
+# Zero epsilon
+statement error
+SELECT dp_gaussian_noise(100.0, 0.0, 1e-5, 1000.0);
+
+# Negative delta
+statement error
+SELECT dp_gaussian_noise(100.0, 1.0, -1e-5, 1000.0);
+
+# Delta >= 1 (invalid for DP)
+statement error
+SELECT dp_gaussian_noise(100.0, 1.0, 1.0, 1000.0);
+
+# Negative sensitivity
+statement error
+SELECT dp_gaussian_noise(100.0, 1.0, 1e-5, -1000.0);
+
+# Test 18: Edge case - very small epsilon (lots of noise)
+query I
+SELECT dp_gaussian_noise(100.0, 0.01, 1e-5, 1000.0) IS NOT NULL;
+----
+1
+
+# Test 19: Edge case - very large epsilon (minimal noise)
+query I
+SELECT (dp_gaussian_noise(100.0, 10000.0, 1e-5, 1000.0) BETWEEN 99.0 AND 101.0)::INT;
+----
+1
+
+# Test 20: Edge case - very small delta
+query I
+SELECT dp_gaussian_noise(100.0, 1.0, 1e-10, 1000.0) IS NOT NULL;
+----
+1
+
+# Test 21: L2 sensitivity vs L1 sensitivity
+# Gaussian uses L2 (Euclidean norm), Laplace uses L1 (Manhattan norm)
+# Both should work with same sensitivity value
+query II
+SELECT
+    dp_laplace_noise(100.0, 1.0, 1000.0) IS NOT NULL as laplace_l1,
+    dp_gaussian_noise(100.0, 1.0, 1e-5, 1000.0) IS NOT NULL as gaussian_l2;
+----
+1	1
+
+# Cleanup
+statement ok
+DROP TABLE employees;
+
+statement ok
+DROP TABLE with_nulls;
+
+statement ok
+DROP TABLE numeric_types;
+
