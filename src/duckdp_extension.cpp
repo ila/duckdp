@@ -36,13 +36,17 @@ void DuckdpExtension::Load(ExtensionLoader &loader) {
 
     loader.RegisterFunction(pragma);
 
-    // Register wrapper pragma: PRAGMA dp_sum_wrapper(epsilon_min=..., epsilon_max=..., epsilon_step=..., seeds=...)
+    // Register wrapper pragma: PRAGMA dp_sum_wrapper(epsilon_min=..., epsilon_max=..., epsilon_step=..., runs=...)
     auto wrapper = PragmaFunction::PragmaCall("dp_sum_wrapper", DPSumWrapperPragma, {});
     // Sweep parameters
     wrapper.named_parameters["epsilon_min"] = LogicalType::ANY;
     wrapper.named_parameters["epsilon_max"] = LogicalType::ANY;
     wrapper.named_parameters["epsilon_step"] = LogicalType::ANY;
-    wrapper.named_parameters["seeds"] = LogicalType::ANY; // number of repeats per epsilon
+    wrapper.named_parameters["runs"] = LogicalType::ANY; // number of independent executions per epsilon
+    // Client sweep parameters (optional)
+    wrapper.named_parameters["num_clients_min"] = LogicalType::ANY;
+    wrapper.named_parameters["num_clients_max"] = LogicalType::ANY;
+    wrapper.named_parameters["num_clients_step"] = LogicalType::ANY;
     // Forwarded benchmark parameters (same as dp_sum_benchmark)
     wrapper.named_parameters["num_clients"] = LogicalType::ANY;
     wrapper.named_parameters["max_steps"] = LogicalType::ANY;

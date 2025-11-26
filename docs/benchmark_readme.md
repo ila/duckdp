@@ -26,26 +26,36 @@ Epsilon Allocation
 Let X = max steps per record, Y = max records per client/day, Z = days.
 - Raw per record: epsilon_record = epsilon / (Z * Y)
 - Local per client/day: epsilon_local_day = epsilon / Z
-- Global daily total: epsilon (full)
+- Global per day: epsilon (full per group)
+
+**Important**: Global DP uses **per-query privacy semantics**:
+- Each output group (day) gets noise with full epsilon
+- Total privacy cost for one query = Z × epsilon
+- This prioritizes utility (less noise per result) over strict budget enforcement
+- If running the query multiple times, multiply accordingly
 
 Laplace Scales
 --------------
 Sensitivity S = X.
 - b_record = X / epsilon_record = Z * Y * X / epsilon
 - b_local = X / epsilon_local_day = Z * X / epsilon
-- b_global = X / epsilon
+- b_global = X / epsilon (applied to each group independently)
 
 Gaussian Std Dev
 ----------------
 With delta and S = X;
 - sigma_record = factor * b_record
 - sigma_local = factor * b_local
-- sigma_global = factor * b_global
+- sigma_global = factor * b_global (applied to each group independently)
 Where factor = sqrt(2 ln(1.25/delta)).
 
 Metrics
 -------
-MAE, MRE, RMSE, Max Error as previously defined.
+We report two metrics for each DP strategy:
+- **MAE (Mean Absolute Error)**: Average of |noisy_sum - true_sum| across all days
+- **Std Dev (Standard Deviation)**: Standard deviation of the absolute errors across days
+
+The MAE gives the average error magnitude, while std_dev indicates the variability/consistency of the noise across different days.
 
 Fairness Diagnostics
 --------------------
@@ -60,8 +70,15 @@ PRAGMA dp_sum_benchmark(num_clients=3, max_steps=1000, max_records_per_day=5, nu
 
 Wrapper sweep:
 ```sql
-PRAGMA dp_sum_wrapper(epsilon_min=0.5, epsilon_max=2.0, epsilon_step=0.5, seeds=3, num_clients=5, max_steps=1000, max_records_per_day=10, num_days=7, mechanism='gaussian', delta=1e-6, fairness=true);
+PRAGMA dp_sum_wrapper(epsilon_min=0.5, epsilon_max=2.0, epsilon_step=0.5, runs=3, num_clients=5, max_steps=1000, max_records_per_day=10, num_days=7, mechanism='gaussian', delta=1e-6, fairness=true);
 ```
+
+Visualization
+-------------
+The R plotting script (scripts/plot_dp_results.R) generates a single plot:
+- **dp_error_mae.png**: MAE on log scale with std_dev shown as shaded error ribbons around each line
+
+This visualization makes it easy to see both the average error and its variability across epsilon values.
 
 Limitations & Future Work
 -------------------------
@@ -80,8 +97,9 @@ Quick Reference
 
 FAQ
 ---
+Q: Why only MAE and std_dev? A: These two metrics provide a complete picture: MAE shows average error magnitude, std_dev shows consistency. Other metrics (MRE, RMSE, max error) were redundant.
+
 Q: Why not different epsilons for global vs local? A: We enforce a single budget to simplify interpretation; consider weighted splits or advanced composition if you need differentiated guarantees.
 
 Q: Negative noisy totals? A: Allowed; noise is unbiased. Clamp externally if needed.
 
-Q: Small true totals inflate relative error? A: We guard division with a small threshold (1e-12).

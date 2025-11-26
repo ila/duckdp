@@ -37,10 +37,8 @@ struct DPBenchmarkConfig {
 //===--------------------------------------------------------------------===//
 struct DPBenchmarkResults {
 	struct ErrorMetrics {
-		double mae = 0.0;       // Mean Absolute Error
-		double mre = 0.0;       // Mean Relative Error (percentage)
-		double rmse = 0.0;      // Root Mean Squared Error
-		double max_error = 0.0; // Maximum error across all days
+		double mae = 0.0;      // Mean Absolute Error: AVG(|noisy - true|)
+		double std_dev = 0.0;  // Standard Deviation of errors
 	};
 
 	ErrorMetrics raw_dp;
@@ -57,14 +55,14 @@ struct DPBenchmarkResults {
 //===--------------------------------------------------------------------===//
 // Main Benchmark Function (runs benchmark and returns results)
 //===--------------------------------------------------------------------===//
-DPBenchmarkResults RunDPSumBenchmark(ClientContext &context, const DPBenchmarkConfig &config);
+DPBenchmarkResults RunDPSumBenchmark(Connection &con, const DPBenchmarkConfig &config);
 
 //===--------------------------------------------------------------------===//
 // Pragma Function Handlers
 //===--------------------------------------------------------------------===//
 void DPSumBenchmarkPragma(ClientContext &context, const FunctionParameters &parameters);
 
-// Wrapper pragma that sweeps epsilon over a range and repeats per epsilon
+// Wrapper pragma that sweeps epsilon over a range and runs per epsilon
 void DPSumWrapperPragma(ClientContext &context, const FunctionParameters &parameters);
 
 } // namespace duckdb
