@@ -17,6 +17,7 @@ namespace duckdb {
 struct DPBenchmarkConfig {
 	idx_t num_clients;           // N: Number of clients/users
 	idx_t max_steps_per_record;  // X: Maximum steps per individual record (1..X)
+	idx_t min_records_per_day;   // Min records per client per day (1..Y)
 	idx_t max_records_per_day;   // Y: Maximum records per client per day (1..Y)
 	idx_t num_days;              // Z: Number of days to simulate
 	double epsilon;              // Single privacy budget (used for all mechanisms)
@@ -26,10 +27,11 @@ struct DPBenchmarkConfig {
 	double lower_bound;          // Optional lower bound (default 1)
 	double upper_bound;          // Optional upper bound (default = max_steps_per_record)
 	double percentage_outliers;  // Fraction in [0,1] of values above upper_bound
+	idx_t refresh;               // Multiplier for global sensitivity (default 1)
 
 	DPBenchmarkConfig()
-	    : num_clients(10), max_steps_per_record(10000), max_records_per_day(10), num_days(7), epsilon(1.0),
-	      use_laplace(true), delta(1e-5), seed(42), lower_bound(1.0), upper_bound(0.0), percentage_outliers(0.0) {}
+	    : num_clients(10), max_steps_per_record(10000), min_records_per_day(1), max_records_per_day(10), num_days(7), epsilon(1.0),
+	      use_laplace(true), delta(1e-5), seed(42), lower_bound(1.0), upper_bound(0.0), percentage_outliers(0.0), refresh(1) {}
 };
 
 //===--------------------------------------------------------------------===//

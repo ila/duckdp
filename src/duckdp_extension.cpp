@@ -19,6 +19,7 @@ void DuckdpExtension::Load(ExtensionLoader &loader) {
     // Named parameters
     pragma.named_parameters["num_clients"] = LogicalType::ANY;
     pragma.named_parameters["max_steps"] = LogicalType::ANY;
+    pragma.named_parameters["min_records_per_day"] = LogicalType::ANY;
     pragma.named_parameters["max_records_per_day"] = LogicalType::ANY;
     pragma.named_parameters["num_days"] = LogicalType::ANY;
     pragma.named_parameters["epsilon"] = LogicalType::ANY;
@@ -28,6 +29,7 @@ void DuckdpExtension::Load(ExtensionLoader &loader) {
     pragma.named_parameters["lower_bound"] = LogicalType::ANY;
     pragma.named_parameters["upper_bound"] = LogicalType::ANY;
     pragma.named_parameters["percentage_outliers"] = LogicalType::ANY;
+    pragma.named_parameters["refresh"] = LogicalType::ANY;
     // CSV export + fairness diagnostics
     pragma.named_parameters["export_csv"] = LogicalType::BOOLEAN;
     pragma.named_parameters["csv_path"] = LogicalType::VARCHAR;
@@ -50,6 +52,7 @@ void DuckdpExtension::Load(ExtensionLoader &loader) {
     // Forwarded benchmark parameters (same as dp_sum_benchmark)
     wrapper.named_parameters["num_clients"] = LogicalType::ANY;
     wrapper.named_parameters["max_steps"] = LogicalType::ANY;
+    wrapper.named_parameters["min_records_per_day"] = LogicalType::ANY;
     wrapper.named_parameters["max_records_per_day"] = LogicalType::ANY;
     wrapper.named_parameters["num_days"] = LogicalType::ANY;
     wrapper.named_parameters["mechanism"] = LogicalType::VARCHAR;
@@ -58,6 +61,7 @@ void DuckdpExtension::Load(ExtensionLoader &loader) {
     wrapper.named_parameters["lower_bound"] = LogicalType::ANY;
     wrapper.named_parameters["upper_bound"] = LogicalType::ANY;
     wrapper.named_parameters["percentage_outliers"] = LogicalType::ANY;
+    wrapper.named_parameters["refresh"] = LogicalType::ANY;
     // CSV export + fairness diagnostics
     wrapper.named_parameters["export_csv"] = LogicalType::BOOLEAN;
     wrapper.named_parameters["csv_path"] = LogicalType::VARCHAR;

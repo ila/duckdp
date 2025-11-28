@@ -231,9 +231,9 @@ if (!all(is.na(eps_vals))) {
   eps_max <- max(eps_vals, na.rm = TRUE)
   if (!is.na(eps_min) && !is.na(eps_max)) {
     if (abs(eps_min - eps_max) < .Machine$double.eps^0.5) {
-      config_title_parts_line2 <- c(config_title_parts_line2, paste0("ε=", eps_min))
+      config_title_parts_line2 <- c(config_title_parts_line2, paste0("ε=", format(eps_min, scientific = FALSE, nsmall = 0)))
     } else {
-      config_title_parts_line2 <- c(config_title_parts_line2, paste0("ε=", eps_min, "–", eps_max))
+      config_title_parts_line2 <- c(config_title_parts_line2, paste0("ε=", format(eps_min, scientific = FALSE, nsmall = 0), "–", format(eps_max, scientific = FALSE, nsmall = 0)))
     }
   }
 }
@@ -300,9 +300,10 @@ create_mae_plot <- function(plot_data, x_var, x_label, title_suffix, is_continuo
     base_theme +
     scale_y_log10(labels = comma, breaks = scales::trans_breaks("log10", function(x) 10^x))
 
-  if (is_client_axis) {
-    # For client axis, use comma formatting without scientific notation
-    p <- p + scale_x_continuous(labels = comma, breaks = pretty(plot_data[[x_var]]))
+  # Use log scale for both epsilon and client axes
+  if (is_client_axis || (is_continuous && x_var == "epsilon")) {
+    # For both client and epsilon axes, use log scale with comma formatting
+    p <- p + scale_x_log10(labels = comma, breaks = scales::trans_breaks("log10", function(x) 10^x))
   } else if (is_continuous) {
     p <- p + scale_x_continuous(breaks = pretty(plot_data[[x_var]]))
   } else {

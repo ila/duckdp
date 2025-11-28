@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <fstream>
 #include <filesystem>
+#include <algorithm>
 
 namespace duckdb {
 
@@ -158,7 +159,9 @@ DPBenchmarkResults RunDPSumBenchmark(Connection &con, const DPBenchmarkConfig &i
 	auto cfg = input_cfg;
 	if (cfg.num_clients == 0) cfg.num_clients = 1;
 	if (cfg.num_days == 0) cfg.num_days = 1;
+	if (cfg.min_records_per_day == 0) cfg.min_records_per_day = 1;
 	if (cfg.max_records_per_day == 0) cfg.max_records_per_day = 1;
+	if (cfg.max_records_per_day < cfg.min_records_per_day) cfg.max_records_per_day = cfg.min_records_per_day;
 	if (cfg.max_steps_per_record == 0) cfg.max_steps_per_record = 1;
 	if (cfg.upper_bound <= 0.0) cfg.upper_bound = static_cast<double>(cfg.max_steps_per_record);
 	if (cfg.upper_bound <= cfg.lower_bound) cfg.upper_bound = cfg.lower_bound + 1.0;
@@ -169,14 +172,46 @@ DPBenchmarkResults RunDPSumBenchmark(Connection &con, const DPBenchmarkConfig &i
 	idx_t ub_i = static_cast<idx_t>(std::llround(std::floor(cfg.upper_bound)));
 	if (ub_i <= lb_i) ub_i = lb_i + 1;
 
-	// Epsilon allocation
-	double per_record_sens = static_cast<double>(cfg.max_steps_per_record);
+	// Epsilon allocation and sensitivity calculations
+	//
+	// CORRECTED DP MODE DEFINITIONS:
+	//
+	// Raw DP: Each user's total epsilon budget is split across ALL their records
+	//   - A user contributes records across num_days, each day up to max_records_per_day
+	//   - Per-user total records = num_days × max_records_per_day
+	//   - Epsilon per record = total_epsilon / (num_days × max_records_per_day)
+	//   - Sensitivity per record = upper_bound
+	//   - After adding noise to each record, we sum them up
+	//
+	// Local DP: Each user sends multiple reports (one per day). Each report is privatized independently.
+	//   - A user contributes num_days reports (client-day aggregates)
+	//   - Epsilon per report = total_epsilon / num_days
+	//   - Sensitivity per report = max_records_per_day × upper_bound
+	//   - Each client-day sum gets independent noise, then we sum across clients
+	//
+	// Global DP: Aggregate first, then add noise once per day to the global sum
+	//   - Full epsilon applied to the day-level aggregate
+	//   - Epsilon per day aggregate = total_epsilon (no split, single query per day)
+	//   - Sensitivity = max_records_per_day × upper_bound × refresh (refresh accounts for multiple updates)
+
+	// Raw DP: per-record epsilon (user's budget split across their records)
+	// Use max_records_per_day for worst-case epsilon calculation
 	double denom_records = static_cast<double>(cfg.num_days) * static_cast<double>(cfg.max_records_per_day);
 	if (denom_records < 1.0) denom_records = 1.0;
 	double epsilon_raw_record = cfg.epsilon / denom_records;
 	if (epsilon_raw_record <= 0) epsilon_raw_record = cfg.epsilon;
-	double epsilon_local_day = cfg.epsilon / static_cast<double>(cfg.num_days > 0 ? cfg.num_days : 1);
+	double raw_sensitivity = cfg.upper_bound;  // Sensitivity per individual record
+
+	// Local DP: per-client-day epsilon (user's budget split across days)
+	double epsilon_local_day = cfg.epsilon / static_cast<double>(cfg.num_days);
 	if (epsilon_local_day <= 0) epsilon_local_day = cfg.epsilon;
+	// Use max_records_per_day for worst-case sensitivity
+	double local_sensitivity = static_cast<double>(cfg.max_records_per_day) * cfg.upper_bound;
+
+	// Global DP: full epsilon per day (no split, single global aggregate per day)
+	double epsilon_global_day = cfg.epsilon;
+	// Use max_records_per_day for worst-case sensitivity
+	double global_sensitivity = static_cast<double>(cfg.max_records_per_day) * cfg.upper_bound;
 
 	const bool use_laplace = cfg.use_laplace;
 	const string dpfn = use_laplace ? "dp_laplace_noise" : "dp_gaussian_noise";
@@ -195,7 +230,7 @@ DPBenchmarkResults RunDPSumBenchmark(Connection &con, const DPBenchmarkConfig &i
 	ExecOrThrow(con, "CREATE TEMP TABLE raw_data (client_id INTEGER, day INTEGER, steps BIGINT, dp_steps DOUBLE);");
 
 	// Prepare the DP call for record-level noise
-	string raw_call = DpCall(dpfn, use_laplace, epsilon_raw_record, use_laplace ? per_record_sens : cfg.delta, per_record_sens);
+	string raw_call = DpCall(dpfn, use_laplace, epsilon_raw_record, use_laplace ? raw_sensitivity : cfg.delta, raw_sensitivity);
 	auto dp_raw = raw_call;
 	auto pos = dp_raw.find("%VAL%");
 	dp_raw.replace(pos, 5, "CAST(steps AS DOUBLE)");
@@ -209,7 +244,7 @@ DPBenchmarkResults RunDPSumBenchmark(Connection &con, const DPBenchmarkConfig &i
 	   << "     days AS (SELECT range AS day FROM range(1, " << (cfg.num_days + 1) << ")),\n"
 	   << "     client_days AS (SELECT c.client_id, d.day FROM clients c CROSS JOIN days d),\n"
 	   << "     per_day_counts AS (\n"
-	   << "       SELECT client_id, day, 1 + CAST(FLOOR(random() * " << cfg.max_records_per_day << ") AS BIGINT) AS num_records\n"
+	   << "       SELECT client_id, day, " << cfg.min_records_per_day << " + CAST(FLOOR(random() * " << (cfg.max_records_per_day - cfg.min_records_per_day + 1) << ") AS BIGINT) AS num_records\n"
 	   << "       FROM client_days\n"
 	   << "     ),\n"
 	   << "     raw AS (\n"
@@ -241,7 +276,7 @@ DPBenchmarkResults RunDPSumBenchmark(Connection &con, const DPBenchmarkConfig &i
 	// Create aggregated_client table with Local DP applied
 	ExecOrThrow(con, "CREATE TEMP TABLE aggregated_client (client_id INTEGER, day INTEGER, true_sum DOUBLE, raw_dp_sum DOUBLE, local_dp_sum DOUBLE);");
 
-	string local_call = DpCall(dpfn, use_laplace, epsilon_local_day, use_laplace ? per_record_sens : cfg.delta, per_record_sens);
+	string local_call = DpCall(dpfn, use_laplace, epsilon_local_day, use_laplace ? local_sensitivity : cfg.delta, local_sensitivity);
 	auto local_call_sub = local_call;
 	auto pos2 = local_call_sub.find("%VAL%");
 	local_call_sub.replace(pos2, 5, "CAST(SUM(steps) AS DOUBLE)");
@@ -260,7 +295,7 @@ DPBenchmarkResults RunDPSumBenchmark(Connection &con, const DPBenchmarkConfig &i
 	// Create final_daily by aggregating across clients and applying Global DP
 	ExecOrThrow(con, "CREATE TEMP TABLE final_daily (day INTEGER, true_sum DOUBLE, raw_dp_sum DOUBLE, local_dp_sum DOUBLE, global_dp_sum DOUBLE);");
 
-	string global_call = DpCall(dpfn, use_laplace, cfg.epsilon, use_laplace ? per_record_sens : cfg.delta, per_record_sens);
+	string global_call = DpCall(dpfn, use_laplace, epsilon_global_day, use_laplace ? global_sensitivity : cfg.delta, global_sensitivity);
 	auto global_call_sub = global_call;
 	auto posg = global_call_sub.find("%VAL%");
 	global_call_sub.replace(posg, 5, "SUM(true_sum)");
@@ -349,6 +384,9 @@ void DPSumBenchmarkPragma(ClientContext &context, const FunctionParameters &para
 	}
 	if (named_params.count("max_steps")) {
 		config.max_steps_per_record = named_params.at("max_steps").GetValue<idx_t>();
+	}
+	if (named_params.count("min_records_per_day")) {
+		config.min_records_per_day = named_params.at("min_records_per_day").GetValue<idx_t>();
 	}
 	if (named_params.count("max_records_per_day")) {
 		config.max_records_per_day = named_params.at("max_records_per_day").GetValue<idx_t>();
@@ -495,22 +533,35 @@ void DPSumWrapperPragma(ClientContext &context, const FunctionParameters &parame
     idx_t c_min = 0, c_max = 0, c_step = 0;
     bool sweep_clients = false;
 
+    bool epsilon_step_exp = false;
+    bool clients_step_exp = false;
+
     if (!named_params.count("epsilon_min") || !named_params.count("epsilon_max") || !named_params.count("epsilon_step")) {
         throw std::runtime_error("dp_sum_wrapper requires epsilon_min, epsilon_max, epsilon_step");
     }
 
     e_min = named_params.at("epsilon_min").GetValue<double>();
     e_max = named_params.at("epsilon_max").GetValue<double>();
-    e_step = named_params.at("epsilon_step").GetValue<double>();
+    // epsilon_step may be numeric or the literal string "exp" which means exponential doubling
+    if (named_params.at("epsilon_step").ToString() == "exp") {
+        epsilon_step_exp = true;
+    } else {
+        e_step = named_params.at("epsilon_step").GetValue<double>();
+    }
 
     // Check if client sweep parameters are provided
     if (named_params.count("num_clients_min") && named_params.count("num_clients_max") && named_params.count("num_clients_step")) {
         sweep_clients = true;
         c_min = named_params.at("num_clients_min").GetValue<idx_t>();
         c_max = named_params.at("num_clients_max").GetValue<idx_t>();
-        c_step = named_params.at("num_clients_step").GetValue<idx_t>();
+        // num_clients_step may be numeric or the literal string "exp"
+        if (named_params.at("num_clients_step").ToString() == "exp") {
+            clients_step_exp = true;
+        } else {
+            c_step = named_params.at("num_clients_step").GetValue<idx_t>();
+        }
 
-        if (c_step <= 0) {
+        if (!clients_step_exp && c_step <= 0) {
             throw std::runtime_error("num_clients_step must be > 0");
         }
         if (c_min <= 0 || c_max <= 0) {
@@ -527,7 +578,7 @@ void DPSumWrapperPragma(ClientContext &context, const FunctionParameters &parame
         runs = named_params.at("runs").GetValue<idx_t>();
     }
 
-    if (e_step <= 0.0) {
+    if (!epsilon_step_exp && e_step <= 0.0) {
         throw std::runtime_error("epsilon_step must be > 0");
     }
     if (e_min <= 0.0 || e_max <= 0.0) {
@@ -537,23 +588,54 @@ void DPSumWrapperPragma(ClientContext &context, const FunctionParameters &parame
         throw std::runtime_error("epsilon_max must be >= epsilon_min");
     }
 
-    // Ensure the (epsilon_max - epsilon_min) is an integer multiple of epsilon_step
-    double span = e_max - e_min;
-    double steps_exact = span / e_step;
-    // steps_count is the number of steps between epsilon_min and epsilon_max.
-    idx_t steps_count = (idx_t)llround(steps_exact);
-    if (fabs((double)steps_count * e_step - span) > 1e-9) {
-        throw std::runtime_error("(epsilon_max - epsilon_min) must be an integer multiple of epsilon_step");
+    // Build explicit lists of epsilon values and client counts depending on linear or exponential stepping.
+    std::vector<double> eps_values;
+    if (epsilon_step_exp) {
+        // Exponential (doubling) steps: e_min, e_min*2, ... up to <= e_max
+        double cur = e_min;
+        // guard against infinite loops: require e_min > 0 already satisfied
+        while (cur <= e_max * (1.0 + 1e-12)) {
+            eps_values.push_back(cur);
+            double next = cur * 2.0;
+            if (next <= cur) break; // overflow or no progress
+            cur = next;
+        }
+    } else {
+        double span = e_max - e_min;
+        double steps_exact = span / e_step;
+        idx_t steps_count = (idx_t)llround(steps_exact);
+        if (fabs((double)steps_count * e_step - span) > 1e-9) {
+            throw std::runtime_error("(epsilon_max - epsilon_min) must be an integer multiple of epsilon_step when using linear stepping");
+        }
+        for (idx_t i = 0; i <= steps_count; i++) {
+            eps_values.push_back(e_min + (double)i * e_step);
+        }
     }
 
-    // Calculate client steps if sweeping
-    idx_t client_steps_count = 0;
+    // Build client values vector if sweeping, otherwise single value from base config
+    std::vector<idx_t> client_values;
     if (sweep_clients) {
-        idx_t client_span = c_max - c_min;
-        if (client_span % c_step != 0) {
-            throw std::runtime_error("(num_clients_max - num_clients_min) must be an integer multiple of num_clients_step");
+        if (clients_step_exp) {
+            idx_t cur = c_min;
+            while (cur <= c_max) {
+                client_values.push_back(cur);
+                // Doubling; guard against overflow
+                if (cur > (std::numeric_limits<idx_t>::max() / 2)) break;
+                idx_t next = cur * 2;
+                if (next <= cur) break;
+                cur = next;
+            }
+        } else {
+            if ((c_max - c_min) % c_step != 0) {
+                throw std::runtime_error("(num_clients_max - num_clients_min) must be an integer multiple of num_clients_step when using linear stepping");
+            }
+            idx_t client_steps_count = (c_max - c_min) / c_step;
+            for (idx_t i = 0; i <= client_steps_count; i++) {
+                client_values.push_back(c_min + i * c_step);
+            }
         }
-        client_steps_count = client_span / c_step;
+    } else {
+        // will be filled later from base.num_clients if not sweeping
     }
 
     bool export_csv = false; string csv_path; string csv_delim = ","; bool fairness = false;
@@ -565,6 +647,7 @@ void DPSumWrapperPragma(ClientContext &context, const FunctionParameters &parame
     DPBenchmarkConfig base;
     if (named_params.count("num_clients")) base.num_clients = named_params.at("num_clients").GetValue<idx_t>();
     if (named_params.count("max_steps")) base.max_steps_per_record = named_params.at("max_steps").GetValue<idx_t>();
+    if (named_params.count("min_records_per_day")) base.min_records_per_day = named_params.at("min_records_per_day").GetValue<idx_t>();
     if (named_params.count("max_records_per_day")) base.max_records_per_day = named_params.at("max_records_per_day").GetValue<idx_t>();
     if (named_params.count("num_days")) base.num_days = named_params.at("num_days").GetValue<idx_t>();
     if (named_params.count("mechanism")) { auto mech = named_params.at("mechanism").ToString(); base.use_laplace = (mech == "laplace"); }
@@ -586,12 +669,12 @@ void DPSumWrapperPragma(ClientContext &context, const FunctionParameters &parame
         if (sweep_clients) {
             // Create filename with client sweep info
             std::stringstream fname_ss;
-            fname_ss << "dp_sum_clients" << c_min << "-" << c_max << "_step" << c_step;
+            fname_ss << "dp_sum_clients" << c_min << "-" << c_max << "_step" << (clients_step_exp ? string("exp") : std::to_string(c_step));
             fname_ss << "_days" << base.num_days << "_maxrec" << base.max_records_per_day;
             fname_ss << "_maxsteps" << base.max_steps_per_record;
             fname_ss << "_mech" << (base.use_laplace ? "laplace" : "gaussian");
             fname_ss << "_seed" << seed_base;
-            fname_ss << "_eps" << FormatDoubleTrim(e_min) << "-" << FormatDoubleTrim(e_max) << "_step" << FormatDoubleTrim(e_step);
+            fname_ss << "_eps" << FormatDoubleTrim(e_min) << "-" << FormatDoubleTrim(e_max) << "_step" << (epsilon_step_exp ? string("exp") : FormatDoubleTrim(e_step));
             fname_ss << "_runs" << runs << ".csv";
             std::filesystem::path p(folder);
             p /= fname_ss.str();
@@ -605,10 +688,10 @@ void DPSumWrapperPragma(ClientContext &context, const FunctionParameters &parame
     }
 
     // Progress accounting
-    idx_t total_eps = steps_count + 1;
-    idx_t total_clients = sweep_clients ? (client_steps_count + 1) : 1;
+    idx_t total_eps = (idx_t)eps_values.size();
+    idx_t total_clients = sweep_clients ? (idx_t)client_values.size() : 1;
     idx_t total_runs = total_eps * total_clients * (runs > 0 ? runs : 1);
-    char hdr[256];
+    char hdr[512];
     if (sweep_clients) {
         snprintf(hdr, sizeof(hdr), "Starting dp_sum_wrapper: epsilons=%llu, clients=%llu, runs=%llu, total runs=%llu",
                  (unsigned long long)total_eps, (unsigned long long)total_clients, (unsigned long long)runs, (unsigned long long)total_runs);
@@ -627,11 +710,54 @@ void DPSumWrapperPragma(ClientContext &context, const FunctionParameters &parame
         uint32_t run_seed = seed_base + (uint32_t)rep;
 
         // Iterate over client counts if sweeping
-        for (idx_t c_step_i = 0; c_step_i <= (sweep_clients ? client_steps_count : 0); c_step_i++) {
-            idx_t num_clients_cur = sweep_clients ? (c_min + c_step_i * c_step) : base.num_clients;
+        if (sweep_clients) {
+            for (idx_t ci = 0; ci < client_values.size(); ++ci) {
+                idx_t num_clients_cur = client_values[ci];
 
-            for (idx_t step_i = 0; step_i <= steps_count; step_i++) {
-                double eps_cur = e_min + (double)step_i * e_step;
+                for (idx_t ei = 0; ei < eps_values.size(); ++ei) {
+                    double eps_cur = eps_values[ei];
+                    run_idx++;
+                    // Per-run progress line
+                    {
+                        auto eps_str = FormatDoubleTrim(eps_cur);
+                        auto ts = CurrentTimestamp();
+                        std::stringstream plss;
+                        plss << ts << " [Run " << (unsigned long long)(rep + 1) << "/" << (unsigned long long)runs << "] ";
+                        plss << "clients=" << (unsigned long long)num_clients_cur << " ";
+                        plss << "epsilon=" << eps_str << " (" << (unsigned long long)run_idx << "/" << (unsigned long long)total_runs << ")";
+                        Printer::Print(plss.str());
+                    }
+
+                    DPBenchmarkConfig cfg = base;
+                    cfg.epsilon = eps_cur;
+                    cfg.num_clients = num_clients_cur;
+                    cfg.seed = run_seed;
+                    auto res = RunDPSumBenchmark(con, cfg);
+
+                    std::stringstream ins;
+                    ins.setf(std::ios::fixed); ins.precision(12);
+                    idx_t repeat_idx_db = rep + 1;
+                    ins << "INSERT INTO dp_sum_wrapper_runs VALUES(" << eps_cur << ", " << num_clients_cur << ", " << cfg.seed << ", " << repeat_idx_db << ", 'raw_dp', " << res.raw_dp.mae << ", " << res.raw_dp.std_dev << ");";
+                    ins << "INSERT INTO dp_sum_wrapper_runs VALUES(" << eps_cur << ", " << num_clients_cur << ", " << cfg.seed << ", " << repeat_idx_db << ", 'local_dp', " << res.local_dp.mae << ", " << res.local_dp.std_dev << ");";
+                    ins << "INSERT INTO dp_sum_wrapper_runs VALUES(" << eps_cur << ", " << num_clients_cur << ", " << cfg.seed << ", " << repeat_idx_db << ", 'global_dp', " << res.global_dp.mae << ", " << res.global_dp.std_dev << ");";
+                    ExecOrThrow(con, ins.str());
+
+                    // Append per-run CSV lines immediately
+                    if (export_csv) {
+                        std::ofstream ofs(csv_path, std::ios::app);
+                        ofs.setf(std::ios::fixed);
+                        ofs.precision(12);
+                        ofs << eps_cur << csv_delim << num_clients_cur << csv_delim << cfg.seed << csv_delim << repeat_idx_db << csv_delim << "raw_dp" << csv_delim << res.raw_dp.mae << csv_delim << res.raw_dp.std_dev << "\n";
+                        ofs << eps_cur << csv_delim << num_clients_cur << csv_delim << cfg.seed << csv_delim << repeat_idx_db << csv_delim << "local_dp" << csv_delim << res.local_dp.mae << csv_delim << res.local_dp.std_dev << "\n";
+                        ofs << eps_cur << csv_delim << num_clients_cur << csv_delim << cfg.seed << csv_delim << repeat_idx_db << csv_delim << "global_dp" << csv_delim << res.global_dp.mae << csv_delim << res.global_dp.std_dev << "\n";
+                        ofs.close();
+                    }
+                }
+            }
+        } else {
+            idx_t num_clients_cur = base.num_clients;
+            for (idx_t ei = 0; ei < eps_values.size(); ++ei) {
+                double eps_cur = eps_values[ei];
                 run_idx++;
                 // Per-run progress line
                 {
@@ -639,9 +765,6 @@ void DPSumWrapperPragma(ClientContext &context, const FunctionParameters &parame
                     auto ts = CurrentTimestamp();
                     std::stringstream plss;
                     plss << ts << " [Run " << (unsigned long long)(rep + 1) << "/" << (unsigned long long)runs << "] ";
-                    if (sweep_clients) {
-                        plss << "clients=" << (unsigned long long)num_clients_cur << " ";
-                    }
                     plss << "epsilon=" << eps_str << " (" << (unsigned long long)run_idx << "/" << (unsigned long long)total_runs << ")";
                     Printer::Print(plss.str());
                 }
@@ -694,9 +817,9 @@ void DPSumWrapperPragma(ClientContext &context, const FunctionParameters &parame
     Printer::Print("DP Sum Wrapper Results");
     Printer::Print("======================");
     Printer::Print("Configuration (shared except sweep parameters):");
-    Printer::Print("  Epsilon Range: " + std::to_string(e_min) + " to " + std::to_string(e_max) + " step " + std::to_string(e_step));
+    Printer::Print("  Epsilon Range: " + std::to_string(e_min) + " to " + std::to_string(e_max) + " step " + (epsilon_step_exp ? string("exp") : std::to_string(e_step)));
     if (sweep_clients) {
-        Printer::Print("  Clients Range: " + std::to_string(c_min) + " to " + std::to_string(c_max) + " step " + std::to_string(c_step));
+        Printer::Print("  Clients Range: " + std::to_string(c_min) + " to " + std::to_string(c_max) + " step " + (clients_step_exp ? string("exp") : std::to_string(c_step)));
     } else {
         Printer::Print("  Clients: " + std::to_string(base.num_clients));
     }
@@ -712,18 +835,21 @@ void DPSumWrapperPragma(ClientContext &context, const FunctionParameters &parame
         Printer::Print("Fairness Diagnostics (sample configurations):");
         // Show a few representative configs
         idx_t num_clients_sample = sweep_clients ? c_min : base.num_clients;
-        for (idx_t step_i = 0; step_i <= std::min((idx_t)2, steps_count); step_i++) {
-            double eps_cur = e_min + (double)step_i * e_step;
-            double denom_records = (double)base.num_days * (double)base.max_records_per_day;
-            if (denom_records < 1.0) denom_records = 1.0;
-            double eps_raw_record = eps_cur / denom_records;
-            char fb[256];
-            snprintf(fb, sizeof(fb), "  clients=%llu eps=%.6f raw_per_record=%.6f local_per_day=%.6f global=%.6f",
-                     (unsigned long long)num_clients_sample, eps_cur, eps_raw_record, eps_cur / (double)base.num_days, eps_cur);
-            Printer::Print(fb);
-        }
-        Printer::Print("");
-    }
+        // Pick up to three representative epsilon indices from the precomputed eps_values vector
+        idx_t max_idx = eps_values.empty() ? 0 : (idx_t)eps_values.size() - 1;
+        idx_t num_samples = std::min((idx_t)2, max_idx);
+        for (idx_t step_i = 0; step_i <= num_samples; step_i++) {
+            double eps_cur = eps_values[step_i];
+             double denom_records = (double)base.num_days * (double)base.max_records_per_day;
+             if (denom_records < 1.0) denom_records = 1.0;
+             double eps_raw_record = eps_cur / denom_records;
+             char fb[256];
+             snprintf(fb, sizeof(fb), "  clients=%llu eps=%.6f raw_per_record=%.6f local_per_day=%.6f global=%.6f",
+                      (unsigned long long)num_clients_sample, eps_cur, eps_raw_record, eps_cur / (double)base.num_days, eps_cur);
+             Printer::Print(fb);
+         }
+         Printer::Print("");
+     }
 
     Printer::Print("Aggregated Error Metrics (averaged across runs):");
     if (sweep_clients) {
